@@ -1,0 +1,139 @@
+---
+title: "782-GroupProject"
+author: "Yifan Wang"
+date: "2023-05-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fpp3)
+library(kableExtra)
+library(forecast)
+library(tseries)
+library(fable)
+Sys.setlocale("LC_TIME", "English")
+```
+
+
+
+```{r}
+data<- read_csv("employed.csv") %>% 
+  mutate(Quarter = yearquarter(Quarter)) %>%
+  as_tsibble(index = Quarter)
+
+Financial<-data[,c(1,11)]
+Financial%>%autoplot() + 
+  theme_minimal()
+decomposed_data <- stl(Financial, s.window="periodic")
+plot(decomposed_data)
+### identify as seasonal，use seasonal arima
+```
+
+
+
+```{r}
+###difficient the model
+
+Financial %>%
+gg_tsdisplay(difference(`Financial and Insurance Services`, 4),
+plot_type = "partial", lag_max = 36) +
+labs(title = "Seasonally differened series")
+
+Financial %>%
+gg_tsdisplay(difference(`Financial and Insurance Services`, 4)%>%difference(),
+plot_type = "partial", lag_max = 36) +
+labs(title = "Double differened series")
+###The first-order difference has become stable, d=1
+```
+
+
+```{r}
+# Automatically select the optimal ARIMA model
+fit <- Financial %>% 
+  model(search = ARIMA(`Financial and Insurance Services`, 
+                     stepwise = FALSE),
+        stepwise = ARIMA(`Financial and Insurance Services`))
+glance(fit) %>%
+  arrange(AICc)
+fit %>%
+  select(search) %>%
+  report()
+
+# mannually select ARIMA
+fit_arima2 <- Financial %>%
+  model(m1 = ARIMA(`Financial and Insurance Services` ~ pdq(1,1,0) + PDQ(1,0,0)),
+        m2 = ARIMA(`Financial and Insurance Services`~ pdq(0,1,1) + PDQ(1,0,0)))
+
+glance(fit_arima2 ) %>% arrange(AICc) %>% select(.model:BIC)
+###m2 select M2 for smaller AICc
+```
+
+
+```{r}
+# Automatically select ETS model
+fit_ets <- data %>% model(ETS(`Financial and Insurance Services`))
+# Print model results
+report(fit_ets)
+fit_ets%>%forecast(h=8)
+# Manually select ETS model
+fit_ets2 <- data %>%
+  model(ANN = ETS(`Financial and Insurance Services` ~ error("A") + trend("N") + season("N")),
+        AAN = ETS(`Financial and Insurance Services` ~ error("A") + trend("A") + season("N")),
+        AAdN = ETS(`Financial and Insurance Services` ~ error("A") + trend("Ad") + season("N")))
+
+fit_ets2%>%forecast(h=8)
+
+glance(fit_ets2) %>%
+  select(.model, AICc)
+# Choose ANN, then confirm alpha
+fit_ets2 <- data %>%
+  model(`0.1` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.01) + season("N")),
+        `0.4` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.1) + season("N")),
+        `0.7` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.9) + season("N")),
+        `0.9` = ETS(`Financial and Insurance Services` ~ error("A") + trend("N", alpha = 0.99) + season("N")))
+glance(fit_ets2)
+# 0.7 has the smallest AIC, alpha is close to 0.7
+
+```
+
+
+```{r}
+## Compare ETS and ARIMA
+train<-Financial[1:55,]
+test<-Financial[56:63,]
+
+train %>%stretch_tsibble(.init = 12) %>%
+  model(ets = ETS(`Financial and Insurance Services`),
+        arima = ARIMA(`Financial and Insurance Services`)) %>%
+  forecast(h = 8) %>%
+  accuracy(Financial) %>%
+  select(.model, RMSE:MAPE)
+```
+
+
+```{r}
+### Generate residuals and conduct Ljung-Box analysis
+### a) ETS analysis
+fit_ets %>%
+  gg_tsresiduals()
+fit_ets %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)
+## The innovation residuals appear to have constant variance with no outstanding outlier. The innovation residuals appear to be consistent with white noise as there are only 1 slightly significant autocorrelations at lag 11. This is further backed up by the Ljung-Box test that does not reject the null hypothesis of independence.
+
+### b) ARIMA analysis
+fit %>%
+  select(stepwise) %>%
+  gg_tsresiduals()
+fit %>%
+  select(stepwise) %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)
+
+##The innovation residuals appear to have constant variance with no outstanding outlier. The innovation residuals appear to be consistent with white noise as there are only 1 slightly significant autocorrelations at lag 11(hard to tell).This is further backed up by the Ljung-Box test that does not reject the null hypothesis of independence.
+
+```
+
+
